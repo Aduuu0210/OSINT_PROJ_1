@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+*.pem
+serpapi_key*
+
+# Generated OSINT artifacts (keep directory)
+osint_framework/reports/*
+!osint_framework/reports/.gitkeep
+osint_framework/assets/*
+!osint_framework/assets/.gitkeep
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
