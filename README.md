@@ -60,10 +60,29 @@ python -m osint_framework.main -t "Jane Doe" \
   --modules web,news,maps,lens
 
 # 3c. Interactive dashboard
+./run_ui.sh
+# or:
 python -m osint_framework.main --ui
 # or:
-streamlit run osint_framework/app.py --server.address 0.0.0.0
+streamlit run osint_framework/app.py --server.address 0.0.0.0 --server.headless true
 ```
+
+### Running on WSL (Windows Subsystem for Linux)
+
+WSL cannot auto-open a browser and inotify file-watching is unreliable, so the
+repo ships WSL-safe Streamlit defaults in `.streamlit/config.toml`
+(`headless = true`, `address = "0.0.0.0"`, `fileWatcherType = "poll"`).
+
+```bash
+cd <repo-root>                      # the folder that contains osint_framework/
+pip install -r requirements.txt
+./run_ui.sh                          # sets PYTHONPATH + WSL-safe flags for you
+```
+
+Then open **http://localhost:8501** in your Windows browser.
+
+If you see `ModuleNotFoundError: osint_framework`, make sure you're in the repo
+root and run `export PYTHONPATH="$(pwd):$PYTHONPATH"` before launching.
 
 ## CLI reference
 

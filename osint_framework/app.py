@@ -15,16 +15,45 @@ import time
 from pathlib import Path
 from typing import List
 
+# Path bootstrap — MUST run before any osint_framework imports.
+_THIS_FILE = Path(__file__).resolve()
+_PKG_DIR = _THIS_FILE.parent
+_REPO_ROOT = _PKG_DIR.parent
+
+for _path in (str(_REPO_ROOT), str(_PKG_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+_existing = os.environ.get("PYTHONPATH", "")
+_parts = [p for p in _existing.split(os.pathsep) if p]
+for _path in (str(_REPO_ROOT),):
+    if _path not in _parts:
+        _parts.insert(0, _path)
+os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
+
 import streamlit as st
 
-# Ensure package imports work when launched via `streamlit run app.py`
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-from osint_framework.analytics import detect_target_type
-from osint_framework.main import run_investigation
-from osint_framework.models import InvestigationReport
+try:
+    from osint_framework.analytics import detect_target_type
+    from osint_framework.main import run_investigation
+    from osint_framework.models import InvestigationReport
+except ModuleNotFoundError:
+    try:
+        from analytics import detect_target_type  # type: ignore
+        from main import run_investigation  # type: ignore
+        from models import InvestigationReport  # type: ignore
+    except ModuleNotFoundError as _imp_err:
+        st.set_page_config(page_title="OSINT Framework — Import Error", layout="wide")
+        st.error(
+            "**Import error:** could not load `osint_framework` package.\n\n"
+            f"Details: `{_imp_err}`\n\n"
+            "Fix:\n"
+            "1. `cd` into the **repo root** (folder that contains `osint_framework/`)\n"
+            "2. `pip install -r requirements.txt`\n"
+            "3. `export PYTHONPATH=\"$(pwd):$PYTHONPATH\"`\n"
+            "4. `streamlit run osint_framework/app.py --server.headless true`"
+        )
+        st.stop()
 
 # ---------------------------------------------------------------------------
 # Page config + dark theme polish
