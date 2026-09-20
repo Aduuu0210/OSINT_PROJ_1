@@ -19,16 +19,41 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
-# Allow `python main.py` from inside the package dir AND `python -m osint_framework.main`
-if __name__ == "__main__" and __package__ is None:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_THIS_FILE = Path(__file__).resolve()
+_PKG_DIR = _THIS_FILE.parent
+_REPO_ROOT = _PKG_DIR.parent
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
     __package__ = "osint_framework"
 
-from .analytics import analyze_report, detect_target_type
-from .models import InvestigationReport
-from .modules import LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule
-from .reporter import export_all
-from .serpapi_client import SerpApiClient, SerpApiError
+try:
+    from .analytics import analyze_report, detect_target_type
+    from .models import InvestigationReport
+    from .modules import LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule
+    from .reporter import export_all
+    from .serpapi_client import SerpApiClient, SerpApiError
+except (ImportError, SystemError):
+    try:
+        from osint_framework.analytics import analyze_report, detect_target_type
+        from osint_framework.models import InvestigationReport
+        from osint_framework.modules import (
+            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+        )
+        from osint_framework.reporter import export_all
+        from osint_framework.serpapi_client import SerpApiClient, SerpApiError
+    except ImportError:
+        if str(_PKG_DIR) not in sys.path:
+            sys.path.insert(0, str(_PKG_DIR))
+        from analytics import analyze_report, detect_target_type  # type: ignore
+        from models import InvestigationReport  # type: ignore
+        from modules import (  # type: ignore
+            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+        )
+        from reporter import export_all  # type: ignore
+        from serpapi_client import SerpApiClient, SerpApiError  # type: ignore
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 
@@ -250,20 +275,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def launch_ui() -> int:
-    """Spawn Streamlit against app.py."""
+    """Spawn Streamlit against app.py with WSL-safe flags."""
     app_path = Path(__file__).resolve().parent / "app.py"
+    env_pythonpath = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in env_pythonpath.split(os.pathsep) if p]
+    if str(_REPO_ROOT) not in parts:
+        parts.insert(0, str(_REPO_ROOT))
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+
+    cmd_flags = [
+        "--server.headless=true",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--browser.gatherUsageStats=false",
+    ]
     try:
         from streamlit.web import cli as stcli
+        sys.argv = ["streamlit", "run", str(app_path), *cmd_flags]
+        return stcli.main()
     except Exception:
-        # Fallback: shell out
         import subprocess
-
-        cmd = [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.headless=true"]
+        cmd = [sys.executable, "-m", "streamlit", "run", str(app_path), *cmd_flags]
         logger.info("Launching Streamlit: %s", " ".join(cmd))
         return subprocess.call(cmd)
-
-    sys.argv = ["streamlit", "run", str(app_path), "--server.headless=true"]
-    return stcli.main()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
