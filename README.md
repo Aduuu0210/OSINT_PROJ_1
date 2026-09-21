@@ -543,3 +543,25 @@ This framework only queries **public** indexes via SerpApi. It is intended for
 legitimate security research, fraud investigation, and defensive OSINT. Always
 corroborate findings before operational, legal, or HR action. Respect applicable
 laws and SerpApi's terms of service.
+
+---
+
+## Built with AI assistance
+
+This project was developed with the help of AI coding assistants, including
+through [Arena.ai](https://arena.ai/)'s Agent Mode. AI contributed to the
+implementation, documentation, and test coverage.
+
+Everything merged here was **reviewed and verified by a human maintainer** before
+being accepted. Where AI-generated claims could be checked mechanically —
+dependency behaviour, API contracts, query counts, exit codes — they were checked
+rather than trusted, and a number of them turned out to be wrong and were
+corrected in review. `scripts/smoke_test.py` exists so that any of it can be
+re-verified at any time:
+
+```bash
+python scripts/smoke_test.py
+```
+
+If you find something incorrect, please open an issue. Treat the automated
+verification suite as the source of truth over any prose in this README.
