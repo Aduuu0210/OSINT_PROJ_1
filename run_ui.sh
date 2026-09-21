@@ -23,7 +23,7 @@ HOST="${HOST:-0.0.0.0}"
 # Seed a user-level Streamlit config if missing (WSL-friendly defaults)
 mkdir -p "${HOME}/.streamlit"
 if [[ ! -f "${HOME}/.streamlit/config.toml" ]]; then
-  cat > "${HOME}/.streamlit/config.toml" << 'CFG'
+  cat > "${HOME}/.streamlit/config.toml" << 'EOF'
 [browser]
 gatherUsageStats = false
 
@@ -32,7 +32,7 @@ headless = true
 address = "0.0.0.0"
 port = 8501
 fileWatcherType = "poll"
-CFG
+EOF
 fi
 
 echo "============================================================"

@@ -1,14 +1,28 @@
-serpapi>=0.1.5
-google-search-results>=2.4.2
-streamlit>=1.28.0
-pandas>=2.0.0
-networkx>=3.1
-pyvis>=0.3.2
-folium>=0.14.0
-streamlit-folium>=0.15.0
-python-dateutil>=2.8.2
-requests>=2.31.0
-urllib3>=2.0.0
-jinja2>=3.1.2
-stix2>=3.0.1
-openpyxl>=3.1.2
+# OSINT Framework — pinned to the versions this codebase was verified against
+# (Python 3.11). Ceilings block the next major release of each dependency so a
+# fresh `pip install -r requirements.txt` cannot silently pull a breaking
+# upgrade. Bump a ceiling deliberately, then re-run the checks in README.
+
+# --- SerpApi transports (either satisfies serpapi_client._import_serpapi) ---
+serpapi>=1.1.1,<2
+google-search-results>=2.4.2,<3
+
+# --- UI ---
+streamlit>=1.64.0,<2
+streamlit-folium>=0.27.4,<1
+folium>=0.20.0,<1
+
+# --- Data / reporting ---
+pandas>=3.0.6,<4
+openpyxl>=3.1.5,<4
+stix2>=3.0.2,<4
+jinja2>=3.1.6,<4
+python-dateutil>=2.9.0,<3
+
+# --- Graph / visualisation ---
+networkx>=3.6.1,<4
+pyvis>=0.3.2,<1
+
+# --- HTTP ---
+requests>=2.34.2,<3
+urllib3>=2.8.0,<3

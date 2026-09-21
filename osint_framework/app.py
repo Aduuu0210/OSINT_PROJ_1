@@ -2,7 +2,7 @@
 """
 Streamlit dark-mode OSINT dashboard.
 
-Launch:
+Launch (from repo root):
     streamlit run osint_framework/app.py
     python -m osint_framework.main --ui
 """
@@ -15,15 +15,22 @@ import time
 from pathlib import Path
 from typing import List
 
+# ---------------------------------------------------------------------------
 # Path bootstrap — MUST run before any osint_framework imports.
+# Handles:
+#   • streamlit run osint_framework/app.py   (cwd = repo root)
+#   • streamlit run app.py                   (cwd = osint_framework/)
+#   • WSL paths under /mnt/c/...
+# ---------------------------------------------------------------------------
 _THIS_FILE = Path(__file__).resolve()
-_PKG_DIR = _THIS_FILE.parent
-_REPO_ROOT = _PKG_DIR.parent
+_PKG_DIR = _THIS_FILE.parent                 # .../osint_framework
+_REPO_ROOT = _PKG_DIR.parent                 # repo root
 
 for _path in (str(_REPO_ROOT), str(_PKG_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+# Ensure PYTHONPATH is also set for any child processes Streamlit may spawn
 _existing = os.environ.get("PYTHONPATH", "")
 _parts = [p for p in _existing.split(os.pathsep) if p]
 for _path in (str(_REPO_ROOT),):
@@ -31,8 +38,9 @@ for _path in (str(_REPO_ROOT),):
         _parts.insert(0, _path)
 os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
 
-import streamlit as st
+import streamlit as st  # noqa: E402
 
+# Prefer package imports; fall back to flat imports if package isn't resolvable
 try:
     from osint_framework.analytics import detect_target_type
     from osint_framework.main import run_investigation
@@ -48,10 +56,17 @@ except ModuleNotFoundError:
             "**Import error:** could not load `osint_framework` package.\n\n"
             f"Details: `{_imp_err}`\n\n"
             "Fix:\n"
-            "1. `cd` into the **repo root** (folder that contains `osint_framework/`)\n"
+            "1. `cd` into the **repo root** (the folder that contains `osint_framework/`)\n"
             "2. `pip install -r requirements.txt`\n"
             "3. `export PYTHONPATH=\"$(pwd):$PYTHONPATH\"`\n"
             "4. `streamlit run osint_framework/app.py --server.headless true`"
+        )
+        st.code(
+            f"sys.path = {sys.path[:8]}\n"
+            f"REPO_ROOT = {_REPO_ROOT}\n"
+            f"PKG_DIR   = {_PKG_DIR}\n"
+            f"cwd       = {Path.cwd()}",
+            language="text",
         )
         st.stop()
 
@@ -173,6 +188,9 @@ def _init_state() -> None:
         "api_key": os.environ.get("SERPAPI_API_KEY")
         or os.environ.get("SERP_API_KEY")
         or "",
+        "hibp_api_key": os.environ.get("HIBP_API_KEY")
+        or os.environ.get("HIBP_KEY")
+        or "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -196,6 +214,20 @@ with st.sidebar:
         placeholder="serp_xxxxxxxx",
     )
     st.session_state["api_key"] = api_key
+
+    hibp_api_key = st.text_input(
+        "HIBP API Key (optional)",
+        value=st.session_state["hibp_api_key"],
+        type="password",
+        help=(
+            "Only needed if you enable the **HIBP Breach** module below. "
+            "Have I Been Pwned's account-lookup endpoint is a paid API — "
+            "get a key at https://haveibeenpwned.com/API/Key "
+            "(or set HIBP_API_KEY)."
+        ),
+        placeholder="32-character hex key",
+    )
+    st.session_state["hibp_api_key"] = hibp_api_key
 
     st.markdown("---")
     st.markdown("### 🎯 Target")
@@ -224,6 +256,22 @@ with st.sidebar:
     with col_b:
         use_maps = st.checkbox("Maps", value=True)
         use_lens = st.checkbox("Lens", value=bool(image_url))
+
+    use_hibp = st.checkbox(
+        "HIBP Breach",
+        value=bool(hibp_api_key),
+        help=(
+            "Have I Been Pwned: does this exact email/domain appear in a known "
+            "data breach or paste? Stronger signal than a search hit, but the "
+            "endpoint is paid and needs its own key. Only works for email or "
+            "domain targets."
+        ),
+    )
+    if use_hibp and not hibp_api_key:
+        st.warning(
+            "HIBP Breach is enabled but no HIBP API key is set — the check will "
+            "be reported as **not performed**, not as 'no breaches found'."
+        )
 
     st.markdown("---")
     st.markdown("### ⚡ Performance")
@@ -267,11 +315,42 @@ def _append_log(msg: str) -> None:
     st.session_state["logs"].append(f"{time.strftime('%H:%M:%S')}  {msg}")
 
 
+def _failed_query_counts(rep: InvestigationReport) -> tuple:
+    """
+    (failed, total) query counts, reconciled so the two can never contradict
+    each other. Prefers the counters written by the pipeline and falls back to
+    the live query list, taking the larger of the two as the truth so a
+    partially-populated report can never render "18 of 0 queries failed".
+    """
+    md = rep.metadata or {}
+    failed = int(md.get("errored_queries") or 0)
+    total = int(md.get("total_queries") or 0)
+    live_total = len(rep.attempted_queries or [])
+    live_failed = sum(
+        1 for q in (rep.attempted_queries or []) if getattr(q, "status", "") == "error"
+    )
+    failed = max(failed, live_failed)
+    total = max(total, live_total, failed)
+    return failed, total
+
+
 if run_clicked:
     if not api_key:
-        st.error("SerpApi API key is required. Enter it in the sidebar or set SERPAPI_API_KEY.")
+        st.error(
+            "**SerpApi API key is required.**\n\n"
+            "1. Get a free key at https://serpapi.com/dashboard\n"
+            "2. Paste it into the **SerpApi API Key** field in the sidebar, "
+            "*or* set it once for your shell with "
+            "`export SERPAPI_API_KEY=\"your_key\"` and restart the dashboard.\n\n"
+            "See the **Quick start** section of `README.md`."
+        )
     elif not target and not image_url:
-        st.error("Provide a target and/or an image URL.")
+        st.error(
+            "**Nothing to investigate yet.** Enter a target in the sidebar — "
+            "an email (`suspect@example.com`), a phone number "
+            "(`+1 415-555-0100`), a name, or a username. "
+            "An image URL alone also works, for a reverse-image (Lens) search."
+        )
     else:
         modules: List[str] = []
         if use_web:
@@ -282,6 +361,8 @@ if run_clicked:
             modules.append("maps")
         if use_lens or image_url:
             modules.append("lens")
+        if use_hibp:
+            modules.append("hibp")
         if not modules:
             modules = ["web"]
 
@@ -317,20 +398,32 @@ if run_clicked:
                     progress_callback=progress_cb,
                     export=True,
                     include_visuals=include_visuals,
+                    hibp_api_key=hibp_api_key or None,
                 )
             st.session_state["report"] = report
             st.session_state["exports"] = report.metadata.get("exports") or {}
+            incomplete = bool(report.metadata.get("collection_incomplete"))
             status.update(
                 label=f"Complete — score {report.threat.score}/100 ({report.threat.level.value})",
-                state="complete",
-                expanded=False,
+                state="error" if incomplete else "complete",
+                expanded=incomplete,
             )
-            st.success(
-                f"Investigation finished. "
+            summary_line = (
                 f"{report.metadata.get('deduped_hits', 0)} validated hits · "
                 f"{len(report.entities)} entities · "
                 f"score {report.threat.score}/100"
             )
+            if incomplete:
+                _failed, _total = _failed_query_counts(report)
+                st.warning(
+                    f"**Investigation finished with errors.** {summary_line}\n\n"
+                    f"{_failed} of {_total} queries failed, so these results "
+                    f"cover only part of the intended search. Fix the underlying error "
+                    f"and re-run before drawing any conclusion.\n\n"
+                    f"First error: `{(report.metadata.get('errors') or ['unknown'])[0]}`"
+                )
+            else:
+                st.success(f"Investigation finished. {summary_line}")
         except Exception as exc:
             status.update(label="Investigation failed", state="error")
             st.exception(exc)
@@ -377,6 +470,14 @@ for col, label, value, extra in cards:
         )
 
 st.markdown("")
+if report.metadata.get("collection_incomplete"):
+    _failed, _total = _failed_query_counts(report)
+    st.error(
+        f"**Coverage warning — this report is incomplete.** "
+        f"{_failed} of {_total} queries failed. The threat score below "
+        f"reflects only the searches that succeeded and must not be treated as a "
+        f"clean result. See the **Queries** tab for the per-query errors."
+    )
 st.markdown(f"**Assessment:** {report.threat.summary}")
 
 if report.threat.factors:
@@ -400,10 +501,21 @@ tab_results, tab_entities, tab_queries, tab_graph, tab_map, tab_exports, tab_log
 
 with tab_results:
     if not hits:
-        st.warning(
-            "Zero validated records after anti-false-positive filtering. "
-            "See the **Queries** tab for the full attempt audit (Zero Records section)."
-        )
+        if report.metadata.get("collection_incomplete"):
+            _failed, _total = _failed_query_counts(report)
+            st.error(
+                "No validated records — but this is **not** a clean result: "
+                f"{_failed} of {_total} queries failed, so most engines "
+                "never returned data. Check the **Queries** tab for the errors "
+                "(usually an invalid API key or exhausted quota) and re-run."
+            )
+        else:
+            st.warning(
+                "Zero validated records after anti-false-positive filtering. "
+                "All queries executed successfully — the target simply produced no "
+                "exact matches. See the **Queries** tab for the full attempt audit "
+                "(Zero Records section)."
+            )
     else:
         try:
             import pandas as pd

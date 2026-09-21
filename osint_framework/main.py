@@ -8,6 +8,7 @@ Examples
   python -m osint_framework.main -t "+1 415-555-0100" --modules web,maps,news
   python -m osint_framework.main -t "Alice Smith" --image-url https://example.com/face.jpg
   python -m osint_framework.main --ui
+  streamlit run osint_framework/app.py
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
+# ---------------------------------------------------------------------------
+# Path / package bootstrap
+# Works for:
+#   python -m osint_framework.main
+#   python osint_framework/main.py
+#   import via streamlit (app.py imports run_investigation)
+# ---------------------------------------------------------------------------
 _THIS_FILE = Path(__file__).resolve()
 _PKG_DIR = _THIS_FILE.parent
 _REPO_ROOT = _PKG_DIR.parent
@@ -31,16 +39,23 @@ if __name__ == "__main__" and (__package__ is None or __package__ == ""):
 
 try:
     from .analytics import analyze_report, detect_target_type
-    from .models import InvestigationReport
-    from .modules import LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule
+    from .models import AttemptedQuery, InvestigationReport
+    from .modules import (
+        HibpBreachModule,
+        LensSearchModule,
+        MapsSearchModule,
+        NewsSearchModule,
+        WebDorksModule,
+    )
     from .reporter import export_all
     from .serpapi_client import SerpApiClient, SerpApiError
 except (ImportError, SystemError):
     try:
         from osint_framework.analytics import analyze_report, detect_target_type
-        from osint_framework.models import InvestigationReport
+        from osint_framework.models import AttemptedQuery, InvestigationReport
         from osint_framework.modules import (
-            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+            HibpBreachModule, LensSearchModule, MapsSearchModule,
+            NewsSearchModule, WebDorksModule,
         )
         from osint_framework.reporter import export_all
         from osint_framework.serpapi_client import SerpApiClient, SerpApiError
@@ -48,9 +63,10 @@ except (ImportError, SystemError):
         if str(_PKG_DIR) not in sys.path:
             sys.path.insert(0, str(_PKG_DIR))
         from analytics import analyze_report, detect_target_type  # type: ignore
-        from models import InvestigationReport  # type: ignore
+        from models import AttemptedQuery, InvestigationReport  # type: ignore
         from modules import (  # type: ignore
-            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+            HibpBreachModule, LensSearchModule, MapsSearchModule,
+            NewsSearchModule, WebDorksModule,
         )
         from reporter import export_all  # type: ignore
         from serpapi_client import SerpApiClient, SerpApiError  # type: ignore
@@ -83,6 +99,14 @@ MODULE_MAP = {
     "maps_search": "maps",
     "news": "news",
     "news_search": "news",
+    # Opt-in: Have I Been Pwned. Needs its own paid key, so it is never enabled
+    # by the default module list — only when explicitly requested.
+    "hibp": "hibp",
+    "hibp_breach": "hibp",
+    "breach": "hibp",
+    "breaches": "hibp",
+    "pwned": "hibp",
+    "haveibeenpwned": "hibp",
 }
 
 
@@ -99,6 +123,7 @@ def run_investigation(
     export: bool = True,
     output_dir: Optional[str] = None,
     include_visuals: bool = True,
+    hibp_api_key: Optional[str] = None,
 ) -> InvestigationReport:
     """
     Full pipeline: multi-engine search → anti-FP filter → NER → threat score → export.
@@ -194,6 +219,26 @@ def run_investigation(
             progress(f"[lens_search] FATAL: {exc}")
             report.metadata.setdefault("errors", []).append(str(exc))
 
+    # ---- HIBP breach exposure (opt-in; separate paid key) ----
+    if "hibp" in normalized:
+        mod = HibpBreachModule(api_key=hibp_api_key)
+        try:
+            out = mod.run(target, target_type=target_type, progress=progress)
+            report.results.extend(out["results"])
+            report.attempted_queries.extend(out["attempted"])
+        except Exception as exc:  # never let one provider sink the run
+            progress(f"[hibp_breach] FATAL: {exc}")
+            report.metadata.setdefault("errors", []).append(str(exc))
+            report.attempted_queries.append(
+                AttemptedQuery(
+                    module=HibpBreachModule.name,
+                    engine=HibpBreachModule.engine,
+                    query=target,
+                    status="error",
+                    error_message=str(exc),
+                )
+            )
+
     progress(
         f"Search phase complete — raw retained rows={len(report.results)} "
         f"(pre-dedup), queries={len(report.attempted_queries)}, "
@@ -207,7 +252,53 @@ def run_investigation(
     report.metadata["api_calls"] = client.call_count
     report.metadata["deduped_hits"] = len(report.deduplicated_results())
 
+    # ------------------------------------------------------------------
+    # Collection-integrity guard.
+    #
+    # A score of 0 means "nothing incriminating was found" ONLY IF the
+    # searches actually ran. When queries errored (invalid/expired API key,
+    # quota exhausted, network failure) the report must never present itself
+    # as a clean assessment — that is a false negative an analyst would act on.
+    # ------------------------------------------------------------------
+    errored = [q for q in report.attempted_queries if q.status == "error"]
+    total_q = len(report.attempted_queries)
+    report.metadata["errored_queries"] = len(errored)
+    report.metadata["total_queries"] = total_q
+    report.metadata["collection_incomplete"] = bool(errored)
+
+    if errored:
+        seen: List[str] = []
+        for q in errored:
+            msg = (q.error_message or "unknown error").strip()
+            if msg and msg not in seen:
+                seen.append(msg)
+        report.metadata["errors"] = seen
+        detail = "; ".join(seen[:3]) or "unspecified query errors"
+        note = (
+            f"INCOMPLETE INVESTIGATION: {len(errored)} of {total_q} queries failed "
+            f"({detail}). The score reflects only the searches that succeeded and "
+            f"MUST NOT be read as a clean result."
+        )
+        if report.threat.score == 0:
+            # Replace the misleading "all clear" wording entirely.
+            report.threat.summary = (
+                f"No conclusion can be drawn for '{report.target}'. {note}"
+            )
+        else:
+            report.threat.summary = f"{report.threat.summary} {note}"
+        if f"Investigation incomplete: {len(errored)}/{total_q} queries failed." not in (
+            report.threat.factors
+        ):
+            report.threat.factors.insert(
+                0, f"Investigation incomplete: {len(errored)}/{total_q} queries failed."
+            )
+        progress(
+            f"WARNING — collection incomplete: {len(errored)}/{total_q} queries failed. "
+            f"Report is NOT a clean result. First error: {seen[0] if seen else 'unknown'}"
+        )
+
     progress(
+
         f"Threat score={report.threat.score}/100 ({report.threat.level.value}) "
         f"entities={len(report.entities)} hits={report.metadata['deduped_hits']}"
     )
@@ -252,7 +343,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--modules",
         default="web,news,maps",
-        help="Comma-separated modules: web,news,maps,lens (default: web,news,maps).",
+        help=(
+            "Comma-separated modules: web,news,maps,lens,hibp "
+            "(default: web,news,maps). 'hibp' is opt-in and needs --hibp-api-key."
+        ),
+    )
+    p.add_argument(
+        "--hibp-api-key",
+        default=os.environ.get("HIBP_API_KEY") or os.environ.get("HIBP_KEY"),
+        help=(
+            "Have I Been Pwned API key for the breach module "
+            "(or set HIBP_API_KEY). Required only when --modules includes 'hibp'; "
+            "that endpoint is paid — see https://haveibeenpwned.com/API/Key"
+        ),
     )
     p.add_argument(
         "--target-type",
@@ -309,13 +412,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return launch_ui()
 
     if not args.target and not args.image_url:
-        parser.print_help()
-        print("\nError: provide --target and/or --image-url (or pass --ui).", file=sys.stderr)
+        # Deliberately NOT parser.print_help(): a 40-line usage dump buries the
+        # one line the user needs. Show the fix, then point at --help.
+        print(
+            "Error: nothing to investigate.\n"
+            "\n"
+            "  Provide --target (email, phone, name, username or URL) and/or\n"
+            "  --image-url for a reverse-image search — or pass --ui for the dashboard.\n"
+            "\n"
+            "  Try:\n"
+            '    python -m osint_framework.main -t "suspect@example.com" '
+            "--modules web,news,maps\n"
+            "\n"
+            "  Full flag reference:  python -m osint_framework.main --help\n"
+            "  Setup guide:          README.md → Quick start",
+            file=sys.stderr,
+        )
         return 2
 
     if not args.api_key:
         print(
-            "Error: SerpApi API key required. Pass --api-key or export SERPAPI_API_KEY.",
+            "Error: SerpApi API key required.\n"
+            "  1. Get a free key at https://serpapi.com/dashboard\n"
+            '  2. export SERPAPI_API_KEY="your_key"   (or pass --api-key)\n\n'
+            "  See the Quick start section of README.md.",
             file=sys.stderr,
         )
         return 2
@@ -334,6 +454,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             export=not args.no_export,
             output_dir=args.output_dir,
             include_visuals=not args.no_visuals,
+            hibp_api_key=args.hibp_api_key,
         )
     except Exception as exc:
         logger.exception("Investigation failed: %s", exc)
@@ -354,8 +475,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         for k, v in exports.items():
             if v:
                 print(f"   - {k}: {v}")
+    incomplete = bool(report.metadata.get("collection_incomplete"))
+    if incomplete:
+        print(
+            f" WARNING: {report.metadata.get('errored_queries', 0)}/"
+            f"{len(report.attempted_queries)} queries failed — report is INCOMPLETE."
+        )
+        for err in (report.metadata.get("errors") or [])[:3]:
+            print(f"   ! {err}")
+        print(
+            " Fix the cause (usually an invalid key or exhausted quota) and re-run.\n"
+            " See the Troubleshooting section of README.md."
+        )
     print("=" * 64 + "\n")
-    return 0
+    # Distinct exit code so scripts / CI never treat a partial run as success.
+    return 3 if incomplete else 0
 
 
 if __name__ == "__main__":
