@@ -210,6 +210,49 @@ def t_counter_consistency():
     assert total >= failed > 0, f"counters inconsistent: {failed}/{total}"
 
 
+@check("error messages tell the user what to do next")
+def t_actionable_errors():
+    import osint_framework.main as m
+
+    # Missing key: must name where to get one and point at the README.
+    err = m.build_parser()
+    assert err is not None
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        code = m.main(["-t", TARGET])
+    out = buf.getvalue()
+    assert code == 2
+    assert "serpapi.com" in out, f"missing-key error does not say where to get a key: {out}"
+    assert "README.md" in out, "missing-key error does not point at the docs"
+
+    # Missing target: must show a runnable example.
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        code = m.main(["--api-key", "k"])
+    out = buf.getvalue()
+    assert code == 2
+    assert "--target" in out or "-t " in out, "usage error does not show the flag"
+
+
+@check("UI guidance names the key source when no key is set")
+def t_ui_key_guidance():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(REPO_ROOT / "osint_framework" / "app.py"), default_timeout=120)
+    at.run()
+    at.sidebar.text_input[0].set_value("")            # no key
+    at.sidebar.text_input[1].set_value(TARGET)        # but a target
+    at.run()
+    at.sidebar.button[0].click()
+    at.run()
+    assert not at.exception, at.exception[0].value if at.exception else "exception"
+    assert at.error, "expected a validation error for the missing key"
+    shown = " ".join(e.value for e in at.error)
+    assert "serpapi.com" in shown, "UI does not tell the user where to get a key"
+    assert "SERPAPI_API_KEY" in shown, "UI does not mention the env var"
+
+
 @check("Streamlit UI renders with no exceptions")
 def t_ui_renders():
     from streamlit.testing.v1 import AppTest
@@ -265,8 +308,9 @@ def main() -> int:
     print(f"OSINT Framework smoke test — python {sys.version.split()[0]}")
     print(f"repo root: {REPO_ROOT}\n")
     for fn in (t_imports, t_detect, t_antifp, t_success, t_integrity_guard,
-               t_cli_exit_codes, t_counter_consistency, t_ui_renders,
-               t_ui_incomplete_banner, t_ui_journey):
+               t_cli_exit_codes, t_counter_consistency, t_actionable_errors,
+               t_ui_key_guidance, t_ui_renders, t_ui_incomplete_banner,
+               t_ui_journey):
         fn()
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

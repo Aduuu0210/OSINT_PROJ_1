@@ -363,13 +363,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return launch_ui()
 
     if not args.target and not args.image_url:
-        parser.print_help()
-        print("\nError: provide --target and/or --image-url (or pass --ui).", file=sys.stderr)
+        # Deliberately NOT parser.print_help(): a 40-line usage dump buries the
+        # one line the user needs. Show the fix, then point at --help.
+        print(
+            "Error: nothing to investigate.\n"
+            "\n"
+            "  Provide --target (email, phone, name, username or URL) and/or\n"
+            "  --image-url for a reverse-image search — or pass --ui for the dashboard.\n"
+            "\n"
+            "  Try:\n"
+            '    python -m osint_framework.main -t "suspect@example.com" '
+            "--modules web,news,maps\n"
+            "\n"
+            "  Full flag reference:  python -m osint_framework.main --help\n"
+            "  Setup guide:          README.md → Quick start",
+            file=sys.stderr,
+        )
         return 2
 
     if not args.api_key:
         print(
-            "Error: SerpApi API key required. Pass --api-key or export SERPAPI_API_KEY.",
+            "Error: SerpApi API key required.\n"
+            "  1. Get a free key at https://serpapi.com/dashboard\n"
+            '  2. export SERPAPI_API_KEY="your_key"   (or pass --api-key)\n\n'
+            "  See the Quick start section of README.md.",
             file=sys.stderr,
         )
         return 2
@@ -416,6 +433,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         for err in (report.metadata.get("errors") or [])[:3]:
             print(f"   ! {err}")
+        print(
+            " Fix the cause (usually an invalid key or exhausted quota) and re-run.\n"
+            " See the Troubleshooting section of README.md."
+        )
     print("=" * 64 + "\n")
     # Distinct exit code so scripts / CI never treat a partial run as success.
     return 3 if incomplete else 0

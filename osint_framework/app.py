@@ -303,9 +303,21 @@ def _failed_query_counts(rep: InvestigationReport) -> tuple:
 
 if run_clicked:
     if not api_key:
-        st.error("SerpApi API key is required. Enter it in the sidebar or set SERPAPI_API_KEY.")
+        st.error(
+            "**SerpApi API key is required.**\n\n"
+            "1. Get a free key at https://serpapi.com/dashboard\n"
+            "2. Paste it into the **SerpApi API Key** field in the sidebar, "
+            "*or* set it once for your shell with "
+            "`export SERPAPI_API_KEY=\"your_key\"` and restart the dashboard.\n\n"
+            "See the **Quick start** section of `README.md`."
+        )
     elif not target and not image_url:
-        st.error("Provide a target and/or an image URL.")
+        st.error(
+            "**Nothing to investigate yet.** Enter a target in the sidebar — "
+            "an email (`suspect@example.com`), a phone number "
+            "(`+1 415-555-0100`), a name, or a username. "
+            "An image URL alone also works, for a reverse-image (Lens) search."
+        )
     else:
         modules: List[str] = []
         if use_web:
