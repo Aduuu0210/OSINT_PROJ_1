@@ -282,6 +282,25 @@ def _append_log(msg: str) -> None:
     st.session_state["logs"].append(f"{time.strftime('%H:%M:%S')}  {msg}")
 
 
+def _failed_query_counts(rep: InvestigationReport) -> tuple:
+    """
+    (failed, total) query counts, reconciled so the two can never contradict
+    each other. Prefers the counters written by the pipeline and falls back to
+    the live query list, taking the larger of the two as the truth so a
+    partially-populated report can never render "18 of 0 queries failed".
+    """
+    md = rep.metadata or {}
+    failed = int(md.get("errored_queries") or 0)
+    total = int(md.get("total_queries") or 0)
+    live_total = len(rep.attempted_queries or [])
+    live_failed = sum(
+        1 for q in (rep.attempted_queries or []) if getattr(q, "status", "") == "error"
+    )
+    failed = max(failed, live_failed)
+    total = max(total, live_total, failed)
+    return failed, total
+
+
 if run_clicked:
     if not api_key:
         st.error("SerpApi API key is required. Enter it in the sidebar or set SERPAPI_API_KEY.")
@@ -335,17 +354,28 @@ if run_clicked:
                 )
             st.session_state["report"] = report
             st.session_state["exports"] = report.metadata.get("exports") or {}
+            incomplete = bool(report.metadata.get("collection_incomplete"))
             status.update(
                 label=f"Complete — score {report.threat.score}/100 ({report.threat.level.value})",
-                state="complete",
-                expanded=False,
+                state="error" if incomplete else "complete",
+                expanded=incomplete,
             )
-            st.success(
-                f"Investigation finished. "
+            summary_line = (
                 f"{report.metadata.get('deduped_hits', 0)} validated hits · "
                 f"{len(report.entities)} entities · "
                 f"score {report.threat.score}/100"
             )
+            if incomplete:
+                _failed, _total = _failed_query_counts(report)
+                st.warning(
+                    f"**Investigation finished with errors.** {summary_line}\n\n"
+                    f"{_failed} of {_total} queries failed, so these results "
+                    f"cover only part of the intended search. Fix the underlying error "
+                    f"and re-run before drawing any conclusion.\n\n"
+                    f"First error: `{(report.metadata.get('errors') or ['unknown'])[0]}`"
+                )
+            else:
+                st.success(f"Investigation finished. {summary_line}")
         except Exception as exc:
             status.update(label="Investigation failed", state="error")
             st.exception(exc)
@@ -392,6 +422,14 @@ for col, label, value, extra in cards:
         )
 
 st.markdown("")
+if report.metadata.get("collection_incomplete"):
+    _failed, _total = _failed_query_counts(report)
+    st.error(
+        f"**Coverage warning — this report is incomplete.** "
+        f"{_failed} of {_total} queries failed. The threat score below "
+        f"reflects only the searches that succeeded and must not be treated as a "
+        f"clean result. See the **Queries** tab for the per-query errors."
+    )
 st.markdown(f"**Assessment:** {report.threat.summary}")
 
 if report.threat.factors:
@@ -415,10 +453,21 @@ tab_results, tab_entities, tab_queries, tab_graph, tab_map, tab_exports, tab_log
 
 with tab_results:
     if not hits:
-        st.warning(
-            "Zero validated records after anti-false-positive filtering. "
-            "See the **Queries** tab for the full attempt audit (Zero Records section)."
-        )
+        if report.metadata.get("collection_incomplete"):
+            _failed, _total = _failed_query_counts(report)
+            st.error(
+                "No validated records — but this is **not** a clean result: "
+                f"{_failed} of {_total} queries failed, so most engines "
+                "never returned data. Check the **Queries** tab for the errors "
+                "(usually an invalid API key or exhausted quota) and re-run."
+            )
+        else:
+            st.warning(
+                "Zero validated records after anti-false-positive filtering. "
+                "All queries executed successfully — the target simply produced no "
+                "exact matches. See the **Queries** tab for the full attempt audit "
+                "(Zero Records section)."
+            )
     else:
         try:
             import pandas as pd

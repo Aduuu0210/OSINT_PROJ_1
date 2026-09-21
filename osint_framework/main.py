@@ -215,7 +215,53 @@ def run_investigation(
     report.metadata["api_calls"] = client.call_count
     report.metadata["deduped_hits"] = len(report.deduplicated_results())
 
+    # ------------------------------------------------------------------
+    # Collection-integrity guard.
+    #
+    # A score of 0 means "nothing incriminating was found" ONLY IF the
+    # searches actually ran. When queries errored (invalid/expired API key,
+    # quota exhausted, network failure) the report must never present itself
+    # as a clean assessment — that is a false negative an analyst would act on.
+    # ------------------------------------------------------------------
+    errored = [q for q in report.attempted_queries if q.status == "error"]
+    total_q = len(report.attempted_queries)
+    report.metadata["errored_queries"] = len(errored)
+    report.metadata["total_queries"] = total_q
+    report.metadata["collection_incomplete"] = bool(errored)
+
+    if errored:
+        seen: List[str] = []
+        for q in errored:
+            msg = (q.error_message or "unknown error").strip()
+            if msg and msg not in seen:
+                seen.append(msg)
+        report.metadata["errors"] = seen
+        detail = "; ".join(seen[:3]) or "unspecified query errors"
+        note = (
+            f"INCOMPLETE INVESTIGATION: {len(errored)} of {total_q} queries failed "
+            f"({detail}). The score reflects only the searches that succeeded and "
+            f"MUST NOT be read as a clean result."
+        )
+        if report.threat.score == 0:
+            # Replace the misleading "all clear" wording entirely.
+            report.threat.summary = (
+                f"No conclusion can be drawn for '{report.target}'. {note}"
+            )
+        else:
+            report.threat.summary = f"{report.threat.summary} {note}"
+        if f"Investigation incomplete: {len(errored)}/{total_q} queries failed." not in (
+            report.threat.factors
+        ):
+            report.threat.factors.insert(
+                0, f"Investigation incomplete: {len(errored)}/{total_q} queries failed."
+            )
+        progress(
+            f"WARNING — collection incomplete: {len(errored)}/{total_q} queries failed. "
+            f"Report is NOT a clean result. First error: {seen[0] if seen else 'unknown'}"
+        )
+
     progress(
+
         f"Threat score={report.threat.score}/100 ({report.threat.level.value}) "
         f"entities={len(report.entities)} hits={report.metadata['deduped_hits']}"
     )
@@ -362,8 +408,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         for k, v in exports.items():
             if v:
                 print(f"   - {k}: {v}")
+    incomplete = bool(report.metadata.get("collection_incomplete"))
+    if incomplete:
+        print(
+            f" WARNING: {report.metadata.get('errored_queries', 0)}/"
+            f"{len(report.attempted_queries)} queries failed — report is INCOMPLETE."
+        )
+        for err in (report.metadata.get("errors") or [])[:3]:
+            print(f"   ! {err}")
     print("=" * 64 + "\n")
-    return 0
+    # Distinct exit code so scripts / CI never treat a partial run as success.
+    return 3 if incomplete else 0
 
 
 if __name__ == "__main__":

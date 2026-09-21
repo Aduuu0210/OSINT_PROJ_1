@@ -22,6 +22,9 @@ Next-generation **Open Source Intelligence** toolkit for identifying scammers an
 OSINT_PROJ_1/
 ├── requirements.txt
 ├── README.md
+├── run_ui.sh               # WSL/Linux/macOS launcher
+├── scripts/
+│   └── smoke_test.py       # offline end-to-end verification (no API key)
 └── osint_framework/
     ├── __init__.py
     ├── main.py              # CLI entry point
@@ -107,6 +110,51 @@ python -m osint_framework.main \
 | `--no-export` | Skip writing report files |
 | `--no-visuals` | Skip graph/map generation |
 | `--ui` | Launch Streamlit |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Investigation completed; every query succeeded |
+| `1` | Unhandled failure during the run |
+| `2` | Usage error (no target, or no API key) |
+| `3` | **Report is incomplete** — one or more queries failed (invalid/expired key, exhausted quota, network). Never treat this run as a clean result. |
+
+## Incomplete-collection guard
+
+A threat score of `0` only means "nothing incriminating found" **if the searches
+actually ran**. When queries fail — an invalid or expired API key, an exhausted
+quota, a network drop — the framework refuses to present the run as a clean
+assessment, because that is a false negative an analyst would act on.
+
+When any query errors:
+
+- `report.threat.summary` is rewritten to `No conclusion can be drawn …` and
+  states how many queries failed and why
+- a leading `Investigation incomplete: N/M queries failed.` risk factor is added
+- `report.metadata` carries `collection_incomplete`, `errored_queries`,
+  `total_queries` and `errors`
+- the dashboard shows a red **Coverage warning** banner and switches the
+  zero-results message from "filtered out" to "most engines never returned data"
+- exported TXT/JSON/STIX reports carry the same warning as the UI
+- the CLI prints a `WARNING` block and exits `3`
+
+Per-query errors are always visible in the **Queries** tab
+(`status` + `error_message`) and the report's Zero Records audit section.
+
+## Verification
+
+An offline smoke test exercises the real pipeline, the integrity guard, the CLI
+exit codes and the Streamlit UI. It stubs only the SerpApi network transport, so
+it needs **no API key** and makes **no outbound requests**:
+
+```bash
+pip install -r requirements.txt
+python scripts/smoke_test.py     # exits 0 when all checks pass
+```
+
+Run it after any change to `main.py`, `app.py`, `models.py` or the modules, and
+after bumping a dependency ceiling in `requirements.txt`.
 
 ## Anti-false-positive contract
 
