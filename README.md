@@ -1,14 +1,19 @@
 # OSINT Framework — SerpApi Powered
 
 Next-generation **Open Source Intelligence** toolkit for identifying scammers and
-persons of interest. Every external lookup is routed exclusively through the
-[SerpApi](https://serpapi.com/) ecosystem (Google, Google News, Google Maps,
-Google Lens).
+persons of interest. Search is routed through the [SerpApi](https://serpapi.com/)
+ecosystem (Google, Google News, Google Maps, Google Lens); breach-exposure
+checking is routed through [Have I Been Pwned](https://haveibeenpwned.com/).
 
 Give it an email, phone number, name, username or photo. It searches four Google
 engines, throws away anything that doesn't actually mention your target, extracts
-the emails/phones/crypto wallets it finds, scores the exposure 0–100, and writes
-JSON / CSV / TXT / STIX 2.1 reports plus a network graph and a map.
+the emails/phones/crypto wallets it finds, optionally confirms known data-breach
+exposure against HIBP, scores the exposure 0–100, and writes JSON / CSV / TXT /
+STIX 2.1 reports plus a network graph and a map.
+
+Two independent signals, deliberately kept apart: **Google dorking** tells you
+what is *publicly indexed* about a target; **HIBP** answers the narrower,
+stronger question *"does this exact account appear in a known breach?"*
 
 ---
 
@@ -18,14 +23,15 @@ JSON / CSV / TXT / STIX 2.1 reports plus a network graph and a map.
 2. [Quick start (5 minutes)](#quick-start-5-minutes)
 3. [Verify your install](#verify-your-install)
 4. [Run your first investigation](#run-your-first-investigation)
-5. [Reading your results](#reading-your-results)
-6. [Troubleshooting](#troubleshooting)
-7. [Exit codes](#exit-codes)
-8. [Incomplete-collection guard](#incomplete-collection-guard)
-9. [Reference](#reference)
-10. [Extending the framework](#extending-the-framework)
-11. [Getting help](#getting-help)
-12. [Disclaimer](#disclaimer)
+5. [Have I Been Pwned module](#have-i-been-pwned-module)
+6. [Reading your results](#reading-your-results)
+7. [Troubleshooting](#troubleshooting)
+8. [Exit codes](#exit-codes)
+9. [Incomplete-collection guard](#incomplete-collection-guard)
+10. [Reference](#reference)
+11. [Extending the framework](#extending-the-framework)
+12. [Getting help](#getting-help)
+13. [Disclaimer](#disclaimer)
 
 ---
 
@@ -90,6 +96,25 @@ set SERPAPI_API_KEY=your_key_here
 Get the key from <https://serpapi.com/dashboard>. Setting it as an environment
 variable means you never have to type it again — the CLI and the dashboard both
 read it automatically.
+
+#### Optional: a Have I Been Pwned key
+
+Only needed for the **HIBP Breach** module, which confirms whether an exact
+email or domain appears in a known data breach or paste. HIBP's account-lookup
+endpoint is a separate **paid** API (from a few dollars a month):
+
+```bash
+# Linux / macOS / WSL
+export HIBP_API_KEY="your_32_char_hex_key"
+
+# Windows PowerShell
+$env:HIBP_API_KEY = "your_32_char_hex_key"
+```
+
+Get one at <https://haveibeenpwned.com/API/Key>. Without it the module is simply
+off. If you enable it *without* a key, the run is reported as **incomplete**
+rather than as "no breaches found" — see
+[Incomplete-collection guard](#incomplete-collection-guard).
 
 ### 4. Launch the dashboard
 
@@ -205,6 +230,68 @@ The exact count for your run is printed as `api_calls` in the log and recorded i
 
 ---
 
+## Have I Been Pwned module
+
+Google dorking tells you what is *publicly indexed*. The HIBP module answers a
+different and much stronger question: **does this exact email or domain appear in
+a known data breach or paste?** A confirmed breach is evidence, not inference, so
+it is weighted far more heavily in the threat score.
+
+### Turning it on
+
+```bash
+# CLI — add hibp to the module list
+python -m osint_framework.main -t "victim@example.com" \
+  --modules web,news,maps,hibp
+
+# The key comes from HIBP_API_KEY, or pass it explicitly
+python -m osint_framework.main -t "victim@example.com" \
+  --modules web,news,maps,hibp --hibp-api-key "abc123..."
+```
+
+In the dashboard, enter the key in **HIBP API Key (optional)** and tick
+**HIBP Breach**. The checkbox is off by default and switches on automatically
+once a key is present.
+
+### What it queries
+
+| Target | Lookups performed |
+|---|---|
+| `victim@example.com` | breaches for the address, pastes for the address, breaches for `example.com` |
+| `example.com` | breaches for the domain |
+| phone / name / username | **skipped** — recorded in the Queries tab, never guessed |
+
+Addresses are never invented from a bare username. Guessing `username@gmail.com`
+would manufacture false positives, which is precisely what this framework exists
+to prevent.
+
+### What it costs
+
+The account-lookup endpoints are **not free**. HIBP's cheapest tier is a few
+dollars a month and is rate-limited to roughly 10 requests/minute; this client
+paces itself under that and retries on `429`/`5xx`. One investigation of an
+email address uses **3 HIBP requests**. The free breach catalogue is used for
+enrichment where available.
+
+Note these are HIBP credits, entirely separate from your SerpApi quota.
+
+### How it reports
+
+| Situation | Recorded as | Report says |
+|---|---|---|
+| Breaches found | `ok` + results | Confirmed exposure, weighted into the score |
+| HTTP `404` | `empty` | A **genuine** "no known breaches" |
+| No key configured | `error` | **INCOMPLETE** — the check never ran |
+| `401` / `403` | `error` | Key rejected, or tier lacks the endpoint |
+| `429` / `5xx` | `error` | Rate limit or outage, after retries |
+| Target isn't an email/domain | `skipped` | Not applicable, with the reason |
+
+The important row is the third one: **a missing key is never reported as "no
+breaches found."** If you ask for a breach check and it could not be performed,
+the whole report is marked incomplete and the CLI exits `3`.
+
+---
+
 ## Reading your results
 
 ### Threat score
@@ -256,6 +343,11 @@ The exact count for your run is printed as `api_calls` in the log and recorded i
 | `Port 8501 is not available` | Another instance is running | Stop it, or use another port: `PORT=8502 ./run_ui.sh`. |
 | Edits don't hot-reload | inotify unreliable on WSL | Expected — the repo sets `fileWatcherType = "poll"`. Restart the server if needed. |
 | `Please replace use_container_width with width` in the log | Streamlit deprecation notice | Cosmetic only; the dashboard still works. Tracked as a known issue. |
+| HIBP: `No HIBP API key configured` | HIBP module enabled without a key | Set `HIBP_API_KEY`, or untick **HIBP Breach**. The run is marked incomplete on purpose. |
+| HIBP: HTTP `401` | Key invalid or not yet activated | Check it at <https://haveibeenpwned.com/API/Key>; new keys can take a moment to activate. |
+| HIBP: HTTP `403` | Subscription tier excludes the endpoint | The account-lookup endpoints need a paid tier. |
+| HIBP: HTTP `429` | Rate limit (~10 req/min on the entry tier) | Wait a minute and re-run, or raise the tier. The client already retries twice. |
+| HIBP shows `skipped` for your target | Target isn't an email or domain | HIBP needs an exact address. Run a search module first and pivot on an email from the **Entities** tab. |
 
 ### Confirming your environment
 
@@ -320,7 +412,8 @@ OSINT_PROJ_1/
     ├── __init__.py
     ├── main.py              # CLI entry point + investigation orchestrator
     ├── app.py               # Streamlit dashboard
-    ├── serpapi_client.py    # API client + concurrency + backoff
+    ├── serpapi_client.py    # SerpApi client + concurrency + backoff
+    ├── hibp_client.py       # Have I Been Pwned client (typed errors, rate limit)
     ├── models.py            # Data classes + is_valid_hit anti-FP filter
     ├── analytics.py         # NER + threat scoring
     ├── visualizer.py        # pyvis graph + folium map
@@ -329,7 +422,8 @@ OSINT_PROJ_1/
     │   ├── web_dorks.py     # engine=google
     │   ├── news_search.py   # engine=google_news
     │   ├── maps_search.py   # engine=google_maps
-    │   └── lens_search.py   # engine=google_lens
+    │   ├── lens_search.py   # engine=google_lens
+    │   └── hibp_breach.py   # engine=hibp  (opt-in, own paid key)
     └── reports/             # osint_report_<timestamp>.*
 ```
 
@@ -340,7 +434,8 @@ OSINT_PROJ_1/
 | `-t / --target` | — | Email, phone, name, username, URL |
 | `--image-url` | — | Google Lens reverse-image input |
 | `--api-key` | `$SERPAPI_API_KEY` | SerpApi key, if not set in the environment |
-| `--modules` | `web,news,maps` | Any of `web`, `news`, `maps`, `lens` |
+| `--modules` | `web,news,maps` | Any of `web`, `news`, `maps`, `lens`, `hibp` |
+| `--hibp-api-key` | `$HIBP_API_KEY` | Have I Been Pwned key; needed only for `--modules hibp` |
 | `--target-type` | `auto` | Force `email`/`phone`/`name`/`username`/`image`/`address`/`url` |
 | `--max-workers` | `4` | Concurrent queries |
 | `--num` | `10` | Results per Google query |
@@ -358,10 +453,18 @@ Every SerpApi organic / news / maps / lens row is discarded unless
 snippet, URL, address, or phone fields. This is non-negotiable and is the main
 reason a run can legitimately return zero hits.
 
+HIBP rows go through the same gate. Their lookups are keyed by the exact account
+and the account is embedded in every snippet, so a well-formed response always
+validates — anything that does not is dropped rather than trusted. That keeps one
+uniform contract across every module instead of a special case.
+
 ### Threat scoring signals
 
 | Signal | Weight |
 |---|---|
+| **Confirmed HIBP breach exposure** | +25 first, +5 each further (cap 45) |
+| HIBP breach flagged sensitive | +10 |
+| Account found in HIBP pastes | +15 |
 | Paste / dump sites (pastebin, rentry, …) | +25 / host (cap 40) |
 | Scam / complaint boards | +20 / host (cap 40) |
 | Exposed PDFs / docs | +10 each (cap 20) |

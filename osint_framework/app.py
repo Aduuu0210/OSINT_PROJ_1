@@ -188,6 +188,9 @@ def _init_state() -> None:
         "api_key": os.environ.get("SERPAPI_API_KEY")
         or os.environ.get("SERP_API_KEY")
         or "",
+        "hibp_api_key": os.environ.get("HIBP_API_KEY")
+        or os.environ.get("HIBP_KEY")
+        or "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -211,6 +214,20 @@ with st.sidebar:
         placeholder="serp_xxxxxxxx",
     )
     st.session_state["api_key"] = api_key
+
+    hibp_api_key = st.text_input(
+        "HIBP API Key (optional)",
+        value=st.session_state["hibp_api_key"],
+        type="password",
+        help=(
+            "Only needed if you enable the **HIBP Breach** module below. "
+            "Have I Been Pwned's account-lookup endpoint is a paid API — "
+            "get a key at https://haveibeenpwned.com/API/Key "
+            "(or set HIBP_API_KEY)."
+        ),
+        placeholder="32-character hex key",
+    )
+    st.session_state["hibp_api_key"] = hibp_api_key
 
     st.markdown("---")
     st.markdown("### 🎯 Target")
@@ -239,6 +256,22 @@ with st.sidebar:
     with col_b:
         use_maps = st.checkbox("Maps", value=True)
         use_lens = st.checkbox("Lens", value=bool(image_url))
+
+    use_hibp = st.checkbox(
+        "HIBP Breach",
+        value=bool(hibp_api_key),
+        help=(
+            "Have I Been Pwned: does this exact email/domain appear in a known "
+            "data breach or paste? Stronger signal than a search hit, but the "
+            "endpoint is paid and needs its own key. Only works for email or "
+            "domain targets."
+        ),
+    )
+    if use_hibp and not hibp_api_key:
+        st.warning(
+            "HIBP Breach is enabled but no HIBP API key is set — the check will "
+            "be reported as **not performed**, not as 'no breaches found'."
+        )
 
     st.markdown("---")
     st.markdown("### ⚡ Performance")
@@ -328,6 +361,8 @@ if run_clicked:
             modules.append("maps")
         if use_lens or image_url:
             modules.append("lens")
+        if use_hibp:
+            modules.append("hibp")
         if not modules:
             modules = ["web"]
 
@@ -363,6 +398,7 @@ if run_clicked:
                     progress_callback=progress_cb,
                     export=True,
                     include_visuals=include_visuals,
+                    hibp_api_key=hibp_api_key or None,
                 )
             st.session_state["report"] = report
             st.session_state["exports"] = report.metadata.get("exports") or {}

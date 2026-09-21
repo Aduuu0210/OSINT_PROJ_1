@@ -298,6 +298,8 @@ class ThreatScorer:
     Dynamic 0-100 risk score.
 
     Signals (additive, capped at 100):
+      - CONFIRMED HIBP breach exposure     +25 first, +5 each more (cap 45)
+        (sensitive breach +10; paste +15)
       - Presence on paste sites            +25 each host (cap 40)
       - Scam-board / complaint sites       +20 each host (cap 40)
       - Exposed PDFs / docs                +10 each (cap 20)
@@ -355,9 +357,46 @@ class ThreatScorer:
             score += pts
             factors.append(f"Exposed documents indexed ({len(doc_links)}): +{pts}")
 
-        # Keyword sweeps across title+snippet
+        # Confirmed breach exposure (Have I Been Pwned).
+        #
+        # This is categorically stronger than keyword evidence: HIBP matched the
+        # exact account against a known breach corpus, so it is confirmation
+        # rather than inference. Scored separately, and HIBP rows are excluded
+        # from the keyword corpus below so the same fact is never counted twice.
+        hibp_rows = [r for r in results if (r.module or "") == "hibp_breach"]
+        hibp_breaches = [
+            r for r in hibp_rows if (r.raw or {}).get("kind") != "pastes"
+        ]
+        hibp_pastes = [
+            r for r in hibp_rows if (r.raw or {}).get("kind") == "pastes"
+        ]
+        if hibp_breaches:
+            pts = min(45, 25 + 5 * (len(hibp_breaches) - 1))
+            score += pts
+            names = ", ".join(
+                sorted({str((r.raw or {}).get("name") or r.title) for r in hibp_breaches})
+            )
+            factors.append(
+                f"CONFIRMED data-breach exposure via Have I Been Pwned "
+                f"({len(hibp_breaches)} breach record(s): {names[:120]}): +{pts}"
+            )
+            if any((r.raw or {}).get("is_sensitive") for r in hibp_breaches):
+                score += 10
+                factors.append("At least one breach is flagged sensitive by HIBP: +10")
+        if hibp_pastes:
+            score += 15
+            factors.append(
+                f"Account appears in {len(hibp_pastes)} public paste(s) "
+                "via Have I Been Pwned: +15"
+            )
+
+        # Keyword sweeps across title+snippet.
+        # HIBP rows are excluded — their snippets always contain breach language,
+        # which would double-count the confirmation already scored above.
         corpus = " ".join(
-            f"{r.title} {r.snippet}".lower() for r in results
+            f"{r.title} {r.snippet}".lower()
+            for r in results
+            if (r.module or "") != "hibp_breach"
         )
         breach_hits = [k for k in BREACH_KEYWORDS if k in corpus]
         if breach_hits:

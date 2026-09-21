@@ -210,6 +210,209 @@ def t_counter_consistency():
     assert total >= failed > 0, f"counters inconsistent: {failed}/{total}"
 
 
+# ---------------------------------------------------------------------------
+# HIBP fakes
+# ---------------------------------------------------------------------------
+
+HIBP_BREACH = {
+    "Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com",
+    "BreachDate": "2013-10-04", "PwnCount": 152445165,
+    "DataClasses": ["Email addresses", "Passwords"],
+    "IsVerified": True, "IsSensitive": False, "IsRetired": False,
+    "IsSpamList": False,
+}
+
+
+class _FakeResp:
+    def __init__(self, code, payload=None):
+        self.status_code = code
+        self._p = payload
+
+    def json(self):
+        if self._p is None:
+            raise ValueError("no payload")
+        return self._p
+
+
+class FakeHibpSession:
+    """Scripts HIBP responses by URL substring; records headers sent."""
+
+    def __init__(self, breach_code=200, paste_code=404, payload=None):
+        self.breach_code = breach_code
+        self.paste_code = paste_code
+        self.payload = payload if payload is not None else [HIBP_BREACH]
+        self.calls = []
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        self.calls.append((url, dict(headers or {})))
+        if "breachedaccount" in url:
+            return _FakeResp(self.breach_code, self.payload)
+        if "pasteaccount" in url:
+            return _FakeResp(self.paste_code)
+        return _FakeResp(404)
+
+
+def _hibp_module(session, *, api_key="a" * 32):
+    from osint_framework.hibp_client import HibpClient
+    from osint_framework.modules import HibpBreachModule
+    # min_interval=0 and max_retries=0 keep the suite fast and deterministic.
+    return HibpBreachModule(
+        client=HibpClient(api_key=api_key, session=session, min_interval=0, max_retries=0)
+    )
+
+
+def _sidebar_input(at, label: str):
+    """
+    Find a sidebar text input by its label rather than its position.
+
+    Positional indexing silently breaks whenever a field is added or reordered —
+    it once made a check pass by typing the target into the API-key box.
+    """
+    for ti in at.sidebar.text_input:
+        if ti.label == label:
+            return ti
+    labels = [ti.label for ti in at.sidebar.text_input]
+    raise AssertionError(f"no sidebar input labelled {label!r}; found {labels}")
+
+
+def _sidebar_check(at, label: str):
+    for cb in at.sidebar.checkbox:
+        if cb.label == label:
+            return cb
+    labels = [cb.label for cb in at.sidebar.checkbox]
+    raise AssertionError(f"no sidebar checkbox labelled {label!r}; found {labels}")
+
+
+@check("HIBP: missing key is an error, never 'no breaches'")
+def t_hibp_no_key():
+    mod = _hibp_module(FakeHibpSession(), api_key="")
+    out = mod.run("victim@example.com")
+    assert out["attempted"], "expected attempted-query records"
+    assert all(q.status == "error" for q in out["attempted"]), \
+        "a skipped-for-no-key lookup must not read as success"
+    assert not out["results"]
+    assert "not performed" in out["attempted"][0].error_message.lower()
+
+
+@check("HIBP: 404 is a genuine negative, not a failure")
+def t_hibp_404_is_clean():
+    mod = _hibp_module(FakeHibpSession(breach_code=404))
+    out = mod.run("victim@example.com")
+    assert out["attempted"]
+    assert all(q.status in ("empty", "ok") for q in out["attempted"]), \
+        "HTTP 404 means 'no breaches' and must not be recorded as an error"
+    assert not any(q.status == "error" for q in out["attempted"])
+    assert not out["results"]
+
+
+@check("HIBP: confirmed breach is returned, keyed and attributed")
+def t_hibp_found():
+    sess = FakeHibpSession()
+    mod = _hibp_module(sess)
+    out = mod.run("victim@example.com")
+    assert out["results"], "expected at least one breach result"
+    r = out["results"][0]
+    assert r.module == "hibp_breach" and r.engine == "hibp"
+    assert "victim@example.com" in r.snippet, "result must name the queried account"
+    assert "Adobe" in r.title
+    # Auth header + required User-Agent must actually be sent.
+    assert any("hibp-api-key" in h for _, h in sess.calls), "no hibp-api-key header"
+    assert all(h.get("User-Agent") for _, h in sess.calls), "User-Agent is mandatory for HIBP"
+
+
+@check("HIBP: auth/rate/server errors are recorded as errors")
+def t_hibp_error_codes():
+    for code in (401, 403, 429, 503, 418):
+        mod = _hibp_module(FakeHibpSession(breach_code=code))
+        out = mod.run("victim@example.com")
+        assert any(q.status == "error" for q in out["attempted"]), \
+            f"HTTP {code} was not recorded as an error"
+
+
+@check("HIBP: non-email targets are skipped, not silently clean")
+def t_hibp_skip_non_email():
+    mod = _hibp_module(FakeHibpSession())
+    for target in ["+1 415-555-0100", "Jane Doe", "@handle"]:
+        out = mod.run(target)
+        assert out["attempted"], f"no audit row for {target}"
+        assert out["attempted"][0].status == "skipped", \
+            f"{target} should be recorded as skipped"
+
+
+@check("HIBP: confirmed breach raises the score without double-counting")
+def t_hibp_scoring():
+    from osint_framework.analytics import ThreatScorer
+    from osint_framework.models import OSINTResult
+
+    t = "victim@example.com"
+    hibp_row = OSINTResult(
+        title="HIBP: Adobe", link="https://haveibeenpwned.com/breach/Adobe",
+        snippet=f"{t} exposed in the Adobe breach — data classes: Email addresses, Passwords",
+        engine="hibp", module="hibp_breach", raw={"kind": "breaches", "name": "Adobe"},
+    )
+    scorer = ThreatScorer()
+
+    alone = scorer.score([hibp_row], [], target=t)
+    assert any("CONFIRMED data-breach" in f for f in alone.factors)
+    assert alone.score >= 25, f"confirmed breach scored only {alone.score}"
+    # The keyword sweep must not re-count the same fact.
+    assert not any("credential-leak language" in f for f in alone.factors), \
+        "HIBP snippet double-counted by the keyword sweep"
+
+    # Independent Google evidence still scores on its own.
+    g = OSINTResult(title="Forum", link="https://f.example/x",
+                    snippet=f"{t} appeared in a breach leak dump",
+                    engine="google", module="web_dorks")
+    both = scorer.score([hibp_row, g], [], target=t)
+    assert both.score > alone.score, "independent breach evidence did not add signal"
+
+
+@check("HIBP runs alongside the Google modules in one investigation")
+def t_hibp_with_google():
+    import osint_framework.main as m
+    from osint_framework.hibp_client import HibpClient
+    from osint_framework.modules import HibpBreachModule
+
+    tmp = tempfile.mkdtemp()
+    sess = FakeHibpSession()
+    real = m.HibpBreachModule
+
+    def fake_ctor(api_key=None, **kw):
+        return real(client=HibpClient(api_key=api_key, session=sess, min_interval=0))
+
+    with mock.patch.object(m, "SerpApiClient", OkClient), \
+         mock.patch.object(m, "HibpBreachModule", fake_ctor):
+        rep = m.run_investigation(TARGET, api_key="k", hibp_api_key="b" * 32,
+                                  modules=["web", "news", "hibp"],
+                                  export=False, include_visuals=False)
+
+    mods = {q.module for q in rep.attempted_queries}
+    assert {"web_dorks", "news_search", "hibp_breach"} <= mods, f"missing modules: {mods}"
+    engines = {r.engine for r in rep.deduplicated_results()}
+    assert "hibp" in engines and "google" in engines, f"engines: {engines}"
+    assert rep.metadata.get("collection_incomplete") is False, \
+        "a fully successful run must not be flagged incomplete"
+
+
+@check("HIBP enabled without a key flags the whole report incomplete")
+def t_hibp_no_key_flags_incomplete():
+    import osint_framework.main as m
+    tmp = tempfile.mkdtemp()
+    with mock.patch.object(m, "SerpApiClient", OkClient), \
+         mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("HIBP_API_KEY", None)
+        os.environ.pop("HIBP_KEY", None)
+        rep = m.run_investigation(TARGET, api_key="k", hibp_api_key=None,
+                                  modules=["web", "hibp"],
+                                  export=True, output_dir=tmp, include_visuals=False)
+    assert rep.metadata.get("collection_incomplete") is True, \
+        "Google succeeded but the requested breach check never ran — must be flagged"
+    hibp_qs = [q for q in rep.attempted_queries if q.module == "hibp_breach"]
+    assert hibp_qs and all(q.status == "error" for q in hibp_qs)
+    txt = (rep.metadata.get("exports") or {}).get("txt")
+    assert txt and "INCOMPLETE" in open(txt, encoding="utf-8").read()
+
+
 @check("error messages tell the user what to do next")
 def t_actionable_errors():
     import osint_framework.main as m
@@ -241,8 +444,8 @@ def t_ui_key_guidance():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(REPO_ROOT / "osint_framework" / "app.py"), default_timeout=120)
     at.run()
-    at.sidebar.text_input[0].set_value("")            # no key
-    at.sidebar.text_input[1].set_value(TARGET)        # but a target
+    _sidebar_input(at, "SerpApi API Key").set_value("")   # no key
+    _sidebar_input(at, "Target").set_value(TARGET)        # but a target
     at.run()
     at.sidebar.button[0].click()
     at.run()
@@ -251,6 +454,10 @@ def t_ui_key_guidance():
     shown = " ".join(e.value for e in at.error)
     assert "serpapi.com" in shown, "UI does not tell the user where to get a key"
     assert "SERPAPI_API_KEY" in shown, "UI does not mention the env var"
+    # Guard against the check passing for the wrong reason: the missing-key
+    # error must fire, not the "nothing to investigate" one.
+    assert "Nothing to investigate" not in shown, \
+        "target was not set correctly; the wrong validation error fired"
 
 
 @check("Streamlit UI renders with no exceptions")
@@ -294,8 +501,10 @@ def t_ui_journey():
         at = AppTest.from_file(str(REPO_ROOT / "osint_framework" / "app.py"),
                               default_timeout=180)
         at.run()
-        at.sidebar.text_input[0].set_value("sk_test_dummy")
-        at.sidebar.text_input[1].set_value(TARGET)
+        _sidebar_input(at, "SerpApi API Key").set_value("sk_test_dummy")
+        _sidebar_input(at, "Target").set_value(TARGET)
+        # HIBP is opt-in and has no key here; keep it off so the run is clean.
+        _sidebar_check(at, "HIBP Breach").set_value(False)
         at.run()
         at.sidebar.button[0].click()
         at.run()
@@ -308,9 +517,12 @@ def main() -> int:
     print(f"OSINT Framework smoke test — python {sys.version.split()[0]}")
     print(f"repo root: {REPO_ROOT}\n")
     for fn in (t_imports, t_detect, t_antifp, t_success, t_integrity_guard,
-               t_cli_exit_codes, t_counter_consistency, t_actionable_errors,
-               t_ui_key_guidance, t_ui_renders, t_ui_incomplete_banner,
-               t_ui_journey):
+               t_cli_exit_codes, t_counter_consistency,
+               t_hibp_no_key, t_hibp_404_is_clean, t_hibp_found,
+               t_hibp_error_codes, t_hibp_skip_non_email, t_hibp_scoring,
+               t_hibp_with_google, t_hibp_no_key_flags_incomplete,
+               t_actionable_errors, t_ui_key_guidance, t_ui_renders,
+               t_ui_incomplete_banner, t_ui_journey):
         fn()
     passed = sum(1 for _, ok, _ in _results if ok)
     failed = len(_results) - passed

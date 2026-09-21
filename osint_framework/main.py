@@ -39,16 +39,23 @@ if __name__ == "__main__" and (__package__ is None or __package__ == ""):
 
 try:
     from .analytics import analyze_report, detect_target_type
-    from .models import InvestigationReport
-    from .modules import LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule
+    from .models import AttemptedQuery, InvestigationReport
+    from .modules import (
+        HibpBreachModule,
+        LensSearchModule,
+        MapsSearchModule,
+        NewsSearchModule,
+        WebDorksModule,
+    )
     from .reporter import export_all
     from .serpapi_client import SerpApiClient, SerpApiError
 except (ImportError, SystemError):
     try:
         from osint_framework.analytics import analyze_report, detect_target_type
-        from osint_framework.models import InvestigationReport
+        from osint_framework.models import AttemptedQuery, InvestigationReport
         from osint_framework.modules import (
-            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+            HibpBreachModule, LensSearchModule, MapsSearchModule,
+            NewsSearchModule, WebDorksModule,
         )
         from osint_framework.reporter import export_all
         from osint_framework.serpapi_client import SerpApiClient, SerpApiError
@@ -56,9 +63,10 @@ except (ImportError, SystemError):
         if str(_PKG_DIR) not in sys.path:
             sys.path.insert(0, str(_PKG_DIR))
         from analytics import analyze_report, detect_target_type  # type: ignore
-        from models import InvestigationReport  # type: ignore
+        from models import AttemptedQuery, InvestigationReport  # type: ignore
         from modules import (  # type: ignore
-            LensSearchModule, MapsSearchModule, NewsSearchModule, WebDorksModule,
+            HibpBreachModule, LensSearchModule, MapsSearchModule,
+            NewsSearchModule, WebDorksModule,
         )
         from reporter import export_all  # type: ignore
         from serpapi_client import SerpApiClient, SerpApiError  # type: ignore
@@ -91,6 +99,14 @@ MODULE_MAP = {
     "maps_search": "maps",
     "news": "news",
     "news_search": "news",
+    # Opt-in: Have I Been Pwned. Needs its own paid key, so it is never enabled
+    # by the default module list — only when explicitly requested.
+    "hibp": "hibp",
+    "hibp_breach": "hibp",
+    "breach": "hibp",
+    "breaches": "hibp",
+    "pwned": "hibp",
+    "haveibeenpwned": "hibp",
 }
 
 
@@ -107,6 +123,7 @@ def run_investigation(
     export: bool = True,
     output_dir: Optional[str] = None,
     include_visuals: bool = True,
+    hibp_api_key: Optional[str] = None,
 ) -> InvestigationReport:
     """
     Full pipeline: multi-engine search → anti-FP filter → NER → threat score → export.
@@ -201,6 +218,26 @@ def run_investigation(
         except SerpApiError as exc:
             progress(f"[lens_search] FATAL: {exc}")
             report.metadata.setdefault("errors", []).append(str(exc))
+
+    # ---- HIBP breach exposure (opt-in; separate paid key) ----
+    if "hibp" in normalized:
+        mod = HibpBreachModule(api_key=hibp_api_key)
+        try:
+            out = mod.run(target, target_type=target_type, progress=progress)
+            report.results.extend(out["results"])
+            report.attempted_queries.extend(out["attempted"])
+        except Exception as exc:  # never let one provider sink the run
+            progress(f"[hibp_breach] FATAL: {exc}")
+            report.metadata.setdefault("errors", []).append(str(exc))
+            report.attempted_queries.append(
+                AttemptedQuery(
+                    module=HibpBreachModule.name,
+                    engine=HibpBreachModule.engine,
+                    query=target,
+                    status="error",
+                    error_message=str(exc),
+                )
+            )
 
     progress(
         f"Search phase complete — raw retained rows={len(report.results)} "
@@ -306,7 +343,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--modules",
         default="web,news,maps",
-        help="Comma-separated modules: web,news,maps,lens (default: web,news,maps).",
+        help=(
+            "Comma-separated modules: web,news,maps,lens,hibp "
+            "(default: web,news,maps). 'hibp' is opt-in and needs --hibp-api-key."
+        ),
+    )
+    p.add_argument(
+        "--hibp-api-key",
+        default=os.environ.get("HIBP_API_KEY") or os.environ.get("HIBP_KEY"),
+        help=(
+            "Have I Been Pwned API key for the breach module "
+            "(or set HIBP_API_KEY). Required only when --modules includes 'hibp'; "
+            "that endpoint is paid — see https://haveibeenpwned.com/API/Key"
+        ),
     )
     p.add_argument(
         "--target-type",
@@ -405,6 +454,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             export=not args.no_export,
             output_dir=args.output_dir,
             include_visuals=not args.no_visuals,
+            hibp_api_key=args.hibp_api_key,
         )
     except Exception as exc:
         logger.exception("Investigation failed: %s", exc)
