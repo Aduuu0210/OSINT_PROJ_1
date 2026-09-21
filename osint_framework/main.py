@@ -8,6 +8,7 @@ Examples
   python -m osint_framework.main -t "+1 415-555-0100" --modules web,maps,news
   python -m osint_framework.main -t "Alice Smith" --image-url https://example.com/face.jpg
   python -m osint_framework.main --ui
+  streamlit run osint_framework/app.py
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional
 
+# ---------------------------------------------------------------------------
+# Path / package bootstrap
+# Works for:
+#   python -m osint_framework.main
+#   python osint_framework/main.py
+#   import via streamlit (app.py imports run_investigation)
+# ---------------------------------------------------------------------------
 _THIS_FILE = Path(__file__).resolve()
 _PKG_DIR = _THIS_FILE.parent
 _REPO_ROOT = _PKG_DIR.parent

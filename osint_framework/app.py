@@ -2,7 +2,7 @@
 """
 Streamlit dark-mode OSINT dashboard.
 
-Launch:
+Launch (from repo root):
     streamlit run osint_framework/app.py
     python -m osint_framework.main --ui
 """
@@ -15,15 +15,22 @@ import time
 from pathlib import Path
 from typing import List
 
+# ---------------------------------------------------------------------------
 # Path bootstrap — MUST run before any osint_framework imports.
+# Handles:
+#   • streamlit run osint_framework/app.py   (cwd = repo root)
+#   • streamlit run app.py                   (cwd = osint_framework/)
+#   • WSL paths under /mnt/c/...
+# ---------------------------------------------------------------------------
 _THIS_FILE = Path(__file__).resolve()
-_PKG_DIR = _THIS_FILE.parent
-_REPO_ROOT = _PKG_DIR.parent
+_PKG_DIR = _THIS_FILE.parent                 # .../osint_framework
+_REPO_ROOT = _PKG_DIR.parent                 # repo root
 
 for _path in (str(_REPO_ROOT), str(_PKG_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+# Ensure PYTHONPATH is also set for any child processes Streamlit may spawn
 _existing = os.environ.get("PYTHONPATH", "")
 _parts = [p for p in _existing.split(os.pathsep) if p]
 for _path in (str(_REPO_ROOT),):
@@ -31,8 +38,9 @@ for _path in (str(_REPO_ROOT),):
         _parts.insert(0, _path)
 os.environ["PYTHONPATH"] = os.pathsep.join(_parts)
 
-import streamlit as st
+import streamlit as st  # noqa: E402
 
+# Prefer package imports; fall back to flat imports if package isn't resolvable
 try:
     from osint_framework.analytics import detect_target_type
     from osint_framework.main import run_investigation
@@ -48,10 +56,17 @@ except ModuleNotFoundError:
             "**Import error:** could not load `osint_framework` package.\n\n"
             f"Details: `{_imp_err}`\n\n"
             "Fix:\n"
-            "1. `cd` into the **repo root** (folder that contains `osint_framework/`)\n"
+            "1. `cd` into the **repo root** (the folder that contains `osint_framework/`)\n"
             "2. `pip install -r requirements.txt`\n"
             "3. `export PYTHONPATH=\"$(pwd):$PYTHONPATH\"`\n"
             "4. `streamlit run osint_framework/app.py --server.headless true`"
+        )
+        st.code(
+            f"sys.path = {sys.path[:8]}\n"
+            f"REPO_ROOT = {_REPO_ROOT}\n"
+            f"PKG_DIR   = {_PKG_DIR}\n"
+            f"cwd       = {Path.cwd()}",
+            language="text",
         )
         st.stop()
 

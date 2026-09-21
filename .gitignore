@@ -20,6 +20,9 @@ osint_framework/reports/*
 osint_framework/assets/*
 !osint_framework/assets/.gitkeep
 
+# pyvis emits a sibling lib/ of JS assets next to each generated graph HTML
+lib/
+
 # OS / IDE
 .DS_Store
 .idea/
